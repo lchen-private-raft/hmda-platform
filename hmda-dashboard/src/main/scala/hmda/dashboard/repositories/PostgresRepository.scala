@@ -81,7 +81,8 @@ class PostgresRepository (config: DatabaseConfig[JdbcProfile],bankFilterList: Ar
   def fetchTotalFilers(period: String): Task[Seq[TotalFilers]] = {
     val tsTable = tsTableSelector(period)
     val query2 = sql"""
-        select count(*) from #${tsTable} where upper(lei) not in (#${filterList});
+        select count(*) from #${tsTable}
+        where upper(lei) not in (#${filterList});
         """.as[TotalFilers]
     Task.deferFuture(db.run(query2)).guarantee(Task.shift)
   }
@@ -387,7 +388,53 @@ class PostgresRepository (config: DatabaseConfig[JdbcProfile],bankFilterList: Ar
     val tsTable = tsTableSelector(period)
     val subHistMview = "submission_hist_mview"
     val query = sql"""
-         select * from (select ts.agency, ts.institution_name, sh.lei, ts.total_lines, sh.sign_date_east :: date, sh.submission_id, rank() over( partition by sh.lei order by sh.sign_date_east asc) from #${subHistMview} as sh left join #${tsTable} as ts on upper(sh.lei) = upper(ts.lei) where upper(sh.lei) not in ( select distinct upper(lei) from #${subHistMview} as sh_sub where sh_sub.sign_date_utc < '#${lateDate}' and split_part(sh_sub.submission_id, '-', 2) = '#${period}' and not Split_part(sh_sub.submission_id, '-', 3) = 'Q1' and not Split_part(sh_sub.submission_id, '-', 3) = 'Q2' and not Split_part(sh_sub.submission_id, '-', 3) = 'Q3') and split_part(sh.submission_id, '-', 2) = '#${period}' and not Split_part(sh.submission_id, '-', 3) = 'Q1' and not Split_part(sh.submission_id, '-', 3) = 'Q2' and not Split_part(sh.submission_id, '-', 3) = 'Q3' order by sh.lei, rank) sl where upper(sl.lei) not in (#${filterList}) and rank=1 order by sign_date_east desc;
+        select * from (
+          select ts.agency, ts.institution_name, sh.lei, ts.total_lines, sh.sign_date_east :: date, sh.submission_id, rank() over(partition by sh.lei order by sh.sign_date_east asc)
+          from #${subHistMview} as sh left join #${tsTable} as ts on upper(sh.lei) = upper(ts.lei)
+          where upper(sh.lei) not in (
+            select distinct upper(lei) from #${subHistMview} as sh_sub
+            where sh_sub.sign_date_utc < '#${lateDate}'
+              and split_part(sh_sub.submission_id, '-', 2) = '#${period}'
+              and not Split_part(sh_sub.submission_id, '-', 3) = 'Q1'
+              and not Split_part(sh_sub.submission_id, '-', 3) = 'Q2'
+              and not Split_part(sh_sub.submission_id, '-', 3) = 'Q3'
+            )
+            and split_part(sh.submission_id, '-', 2) = '#${period}'
+            and not Split_part(sh.submission_id, '-', 3) = 'Q1'
+            and not Split_part(sh.submission_id, '-', 3) = 'Q2'
+            and not Split_part(sh.submission_id, '-', 3) = 'Q3'
+            order by sh.lei, rank
+          ) sl
+        where upper(sl.lei) not in (#${filterList}) and rank=1
+        order by sign_date_east desc;
+      """.as[LateFilers]
+    Task.deferFuture(db.run(query)).guarantee(Task.shift)
+  }
+
+  def fetchLateFilersByQuarter(period: String, quarter: String) : Task[Seq[LateFilers]] = {
+    val tsTable = tsTableSelector(period)
+    val subHistMview = "submission_hist_mview"
+    val normalizedQuarter = quarter.toUpperCase
+    val query = sql"""
+        select * from (
+          select ts.agency, ts.institution_name, sh.lei, ts.total_lines, sh.sign_date_east :: date, sh.submission_id, rank() over(partition by sh.lei order by sh.sign_date_east asc)
+          from #${subHistMview} as sh left join #${tsTable} as ts on upper(sh.lei) = upper(ts.lei)
+          where upper(sh.lei) in (
+            select distinct upper(sh_sub.lei) from submission_hist_mview as sh_sub
+            where (
+                '#${normalizedQuarter}' = 'Q1' and sh_sub.sign_date_utc between '#${period}-06-01' :: timestamp and '#${period}-06-30 23:59:59' :: timestamp or
+                '#${normalizedQuarter}' = 'Q2' and sh_sub.sign_date_utc between '#${period}-08-31' :: timestamp and '#${period}-09-30 23:59:59' :: timestamp or
+                '#${normalizedQuarter}' = 'Q3' and sh_sub.sign_date_utc between '#${period}-11-30' :: timestamp and '#${period}-12-31 23:59:59' :: timestamp
+	          )
+              and split_part(sh_sub.submission_id, '-', 2) = '#${period}'
+              and upper(split_part(sh_sub.submission_id, '-', 3)) = '#${normalizedQuarter}'
+            )
+            and split_part(sh.submission_id, '-', 2) = '#${period}'
+            and upper(split_part(sh.submission_id, '-', 3)) = '#${normalizedQuarter}'
+            order by sh.lei, rank
+          ) sl
+        where upper(sl.lei) not in (#${filterList}) and rank=1
+        order by sign_date_east desc;
       """.as[LateFilers]
     Task.deferFuture(db.run(query)).guarantee(Task.shift)
   }
