@@ -415,24 +415,29 @@ class PostgresRepository (config: DatabaseConfig[JdbcProfile],bankFilterList: Ar
     val tsTable = tsTableSelector(period)
     val subHistMview = "submission_hist_mview"
     val normalizedQuarter = quarter.toUpperCase
+
+    val lateDate = normalizedQuarter match {
+      case "Q1" => s"${period}-06-01"
+      case "Q2" => s"${period}-08-31"
+      case "Q3" => s"${period}-11-30"
+      case _ => throw new IllegalArgumentException(s"Received invalid quarter: $normalizedQuarter")
+    }
+
     val query = sql"""
         select * from (
           select ts.agency, ts.institution_name, sh.lei, ts.total_lines, sh.sign_date_east :: date, sh.submission_id, rank() over(partition by sh.lei order by sh.sign_date_east asc)
           from #${subHistMview} as sh left join #${tsTable} as ts on upper(sh.lei) = upper(ts.lei)
-          where upper(sh.lei) in (
-            select distinct upper(sh_sub.lei) from submission_hist_mview as sh_sub
-            where (
-                '#${normalizedQuarter}' = 'Q1' and sh_sub.sign_date_utc between '#${period}-06-01' :: timestamp and '#${period}-06-30 23:59:59' :: timestamp or
-                '#${normalizedQuarter}' = 'Q2' and sh_sub.sign_date_utc between '#${period}-08-31' :: timestamp and '#${period}-09-30 23:59:59' :: timestamp or
-                '#${normalizedQuarter}' = 'Q3' and sh_sub.sign_date_utc between '#${period}-11-30' :: timestamp and '#${period}-12-31 23:59:59' :: timestamp
-	          )
-              and split_part(sh_sub.submission_id, '-', 2) = '#${period}'
-              and upper(split_part(sh_sub.submission_id, '-', 3)) = '#${normalizedQuarter}'
+          where upper(sh.lei) not in (
+              select distinct upper(lei) from #${subHistMview} as sh_sub
+              where split_part(sh.submission_id, '-', 2) = '#${period}'
+                and upper(split_part(sh.submission_id, '-', 3)) = '#${normalizedQuarter}'
+                and sh_sub.sign_date_utc < '#${lateDate}' :: timestamp
             )
             and split_part(sh.submission_id, '-', 2) = '#${period}'
             and upper(split_part(sh.submission_id, '-', 3)) = '#${normalizedQuarter}'
-            order by sh.lei, rank
-          ) sl
+            and sh.sign_date_utc >= '#${lateDate}' :: timestamp
+          order by sh.lei, rank
+        ) sl
         where upper(sl.lei) not in (#${filterList}) and rank=1
         order by sign_date_east desc;
       """.as[LateFilers]
